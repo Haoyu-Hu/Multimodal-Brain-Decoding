@@ -8,6 +8,8 @@ import math
 
 EPS = 1e-8
 
+device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+
 def overlap_and_add(signal, frame_step):
     """Reconstructs a signal from a framed representation.
 
@@ -40,7 +42,7 @@ def overlap_and_add(signal, frame_step):
 
     frame = torch.arange(0, output_subframes).unfold(0, subframes_per_frame, subframe_step)
     frame = signal.new_tensor(frame).long()  # signal may in GPU or CPU
-    frame = frame.contiguous().view(-1)
+    frame = frame.contiguous().view(-1).to(device)
 
     result = signal.new_zeros(*outer_dimensions, output_subframes, subframe_length)
     result.index_add_(-2, frame, subframe_signal)

@@ -108,16 +108,15 @@ class Brain_Modelling(nn.Module):
         elif self.brain_arch == 'tasnet':
 
             brain_sep, sep_weight = self.brain_extractor(x)
-            la = sep_weight[:,0,:]
-            alpha = torch.div(sep_weight[:,1:,:], 1-la.repeat(sep_weight[:,1:,:].size()))
+            sep_weight = sep_weight.squeeze(-1)
 
             high_states = brain_sep[:,0,:]
             low_states = brain_sep[:,1:,:]
 
             theo_brain = torch.sum(brain_sep, dim=1).squeeze()
 
-            high_states = torch.div(high_states, la)
-            low_states = torch.div(low_states, 1-la.repeat(sep_weight[:,1:,:].size()))
+            # high_states = torch.div(high_states, la)
+            # low_states = torch.div(low_states, 1-la)
         
         high_proc = self.high_MLP(high_states)
         proc_low_list = []
@@ -128,6 +127,8 @@ class Brain_Modelling(nn.Module):
 
         if self.brain_arch == 'MLP':
             low_proc = torch.sum(torch.mul(alpha, low_proc), dim=1).squeeze(1) # R^{N*B*T*J}
+        elif self.n_state > 1:
+            low_proc = low_proc.sum(1)
 
         feature_low = self.low_prior(low_proc)
         feature_high = self.high_prior(high_states)

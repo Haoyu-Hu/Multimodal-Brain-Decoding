@@ -1,5 +1,6 @@
 import wandb
 import numpy as np
+import math
 
 from accelerate import Accelerator
 
@@ -56,7 +57,10 @@ def main():
    clip = FrozenCLIP(args).to(device)
 
    for epoch in range(args.epochs):
+      adjust_learning_rate(optimizer, epoch, args)
+      
       for fmri, img, caption in train_loader:
+
          fmri = fmri.to(device)
          embeded_img_list = []
          for img_idx in range(img.size(0)):
@@ -81,9 +85,10 @@ def main():
                 loss_text_flag = 0
             elif loss_text > loss_text_temp:
                 loss_text = loss_text_temp
+
          loss_img = soft_clip_loss(feature_img, embeded_img)
 
-         loss = loss_text + loss_img + theo_loss
+         loss = loss_text + loss_img + args.beta*theo_loss
 
          optimizer.zero_grad()
          
@@ -94,7 +99,9 @@ def main():
          wandb.log({'train_loss': loss.item()
                     , 'text_loss': loss_text
                     , 'img_loss': loss_img
-                    , 'brain_loss': theo_loss})
+                    , 'brain_loss': theo_loss
+                    , 'epoch': epoch
+                    , 'learning_rate': get_lr(optimizer)})
 
 def soft_clip_loss(preds, targs, temp=0.125):
     clip_clip = (targs @ targs.T)/temp
@@ -104,6 +111,21 @@ def soft_clip_loss(preds, targs, temp=0.125):
     
     loss = (loss1 + loss2)/2
     return loss
+
+def adjust_learning_rate(optimizer, epoch, args):
+    """Decay the learning rate based on schedule"""
+    lr = args.lr
+    if args.cos:  # cosine lr schedule
+        lr *= 0.5 * (1. + math.cos(math.pi * epoch / args.epochs))
+    else:  # stepwise lr schedule
+        for milestone in args.schedule:
+            lr *= 0.1 if epoch >= milestone else 1.
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = lr
+
+def get_lr(optimizer):
+    for param_group in optimizer.param_groups:
+        return param_group['lr']
 
 if __name__ == '__main__':
   main()
