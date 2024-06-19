@@ -8,9 +8,13 @@ def parameter_parser():
 
     parser.add_argument("--run_name", type=str)
 
-    parser.add_argument("--train_path", type=str, default=None, help="Folder with training graph jsons.")
+    parser.add_argument("--train_path", type=str, default=None, help="Folder with training file.")
 
-    parser.add_argument("--test_path", type=str, default=None, help="Folder with testing graph jsons.")
+    parser.add_argument("--test_path", type=str, default=None, help="Folder with testing file.")
+
+    parser.add_argument("--save_model", type=str, default=None, help="Path to save training model.")
+
+    parser.add_argument("--save_test", type=str, default=None, help="Path to save testing result.")
 
     parser.add_argument("--folds", type=int, default=10, help="Default is 10.")
 
