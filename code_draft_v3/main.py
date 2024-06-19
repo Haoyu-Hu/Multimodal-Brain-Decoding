@@ -56,7 +56,7 @@ def train(args, train_loader, main_model, img_encoder, text_encoder, optimizer, 
       # adjust_learning_rate(optimizer, epoch, args)
       
       loss_epoch = 0
-      for count, (fmri, img, caption) in enumerate(tqdm(train_loader)):
+      for count, (fmri, img, caption) in enumerate(train_loader):
 
          fmri = fmri.to(device)
 

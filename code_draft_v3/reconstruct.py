@@ -54,7 +54,7 @@ def test(args, test_loader, main_model, img_encoder, text_encoder):
       
   loss_epoch = 0
   test_store = []
-  for count, (fmri, img, caption) in enumerate(tqdm(test_loader)):
+  for count, (fmri, img, caption) in enumerate(test_loader):
       test_temp = dict()
 
       fmri = fmri.to(device)
