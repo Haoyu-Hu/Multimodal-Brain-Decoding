@@ -56,6 +56,41 @@ class Vec2Text(nn.Module):
         
         return embeddings
 
+from diffusers import AutoencoderKL
+from torchvision.transforms import Resize
+class VAE_Img(nn.Module):
+    def __init__(self, args):
+        super(VAE_Img, self).__init__()
+
+        self.vae = AutoencoderKL.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="vae")
+
+
+    def encode_img(self, input_img):
+        # Single image -> single latent in a batch (so size b, 4, 64, 64)
+        if input_img.size(-1) == 3:
+            input_img = Resize(size=(512,512))(input_img.permute(0, -1, 1, 2)).float()
+        else:
+            input_img = Resize(size=(512,512))(input_img).float()
+        if len(input_img.shape)<4:
+            input_img = input_img.unsqueeze(0)
+        with torch.no_grad():
+            latent_list = []
+            for img_idx in range(input_img.size(0)):
+                img_item = input_img[img_idx].unsqueeze(0)
+                latent = self.vae.encode(img_item*2 - 1) # Note scaling
+                latent_list.append(0.18215 * latent.latent_dist.sample())
+            
+        return torch.stack(latent_list, dim=0)
+
+    def decode_img(self, latents):
+        # bath of latents -> list of images
+        latents = (1 / 0.18215) * latents
+        with torch.no_grad():
+            image = self.vae.decode(latents).sample
+        image = (image / 2 + 0.5).clamp(0, 1)
+        image = image.detach()
+        return image
+
 
 class FrozenCLIP(nn.Module):
     def __init__(self, args):
@@ -151,10 +186,11 @@ class Brain_Modelling(nn.Module):
                                         , nn.Linear(gtr_high*2, gtr_high)
                                         , nn.LayerNorm(gtr_high))
         self.high_prior_clip = nn.Linear(gtr_high, clip_high)
-        self.low_prior = nn.Sequential(nn.Linear(self.regions, r_low*2)
-                                      , nn.PReLU()
-                                      , nn.Linear(r_low*2, r_low)
-                                      , nn.LayerNorm(r_low))
+        # self.low_prior = nn.Sequential(nn.Linear(self.regions, r_low*2)
+        #                               , nn.PReLU()
+        #                               , nn.Linear(r_low*2, r_low)
+        #                               , nn.LayerNorm(r_low))
+        self.low_prior = Voxel2StableDiffusionModel(in_dim=self.regions)
     
     def forward(self, x):
         
@@ -242,126 +278,112 @@ class res_MLP(nn.Module):
 
         return x
 
-class VCM_Encoder(nn.Module):
-    def __init__(self, args):
-        super(VCM_Encoder, self).__init__()
+from diffusers.models.autoencoders.vae import Decoder
+class Voxel2StableDiffusionModel(torch.nn.Module):
+    def __init__(self, in_dim=15724, h=4096, n_blocks=4, use_cont=False, ups_mode='4x'):
+        super().__init__()
+        self.lin0 = nn.Sequential(
+            nn.Linear(in_dim, h, bias=False),
+            nn.LayerNorm(h),
+            nn.SiLU(inplace=True),
+            nn.Dropout(0.5),
+        )
 
-        self.args = args
-        self.regions = args.regions
-        self.time_points = args.time_points
-        self.topk_ratio = args.topk_ratio
-        self.projection = nn.Linear(self.time_points, 1)
-        # self.process = nn.Sequential(nn.Linear(int(self.regions*self.topk_ratio), int(self.regions*self.topk_ratio))
-        #                               , nn.ReLU()
-        #                               , nn.BatchNorm1d(self.time_points)
-        #                               , nn.Dropout(p=0.5))
-        self.process = nn.Sequential(nn.Linear(int(self.regions*self.topk_ratio), int(self.regions*self.topk_ratio))
-                                      , nn.BatchNorm1d(self.time_points))
-        # self.compress = nn.Sequential(nn.Linear(int(self.regions*self.topk_ratio), int(self.regions*self.topk_ratio**2))
-        #                               , nn.BatchNorm1d(self.time_points))
-        self.compress = nn.Sequential(nn.Linear(int(self.regions*self.topk_ratio), int(self.regions*self.topk_ratio**2)))
+        self.mlp = nn.ModuleList([
+            nn.Sequential(
+                nn.Linear(h, h, bias=False),
+                nn.LayerNorm(h),
+                nn.SiLU(inplace=True),
+                nn.Dropout(0.25)
+            ) for _ in range(n_blocks)
+        ])
+        self.ups_mode = ups_mode
+        if ups_mode=='4x':
+            self.lin1 = nn.Linear(h, 16384, bias=False)
+            self.norm = nn.GroupNorm(1, 64)
+            
+            self.upsampler = Decoder(
+                in_channels=64,
+                out_channels=4,
+                up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
+                block_out_channels=[64, 128, 256],
+                layers_per_block=1,
+            )
+
+            if use_cont:
+                self.maps_projector = nn.Sequential(
+                    nn.Conv2d(64, 512, 1, bias=False),
+                    nn.GroupNorm(1,512),
+                    nn.ReLU(True),
+                    nn.Conv2d(512, 512, 1, bias=False),
+                    nn.GroupNorm(1,512),
+                    nn.ReLU(True),
+                    nn.Conv2d(512, 512, 1, bias=True),
+                )
+            else:
+                self.maps_projector = nn.Identity()
         
-    def forward(self, x):
-        border_mask = torch.isnan(x)
-        x[torch.isnan(x)] = 0
-        norm_dim = 1 if len(x.size()) == 3 else 0
-        x = F.normalize(x, dim=norm_dim)
-        score = self.projection(x.transpose(-1,-2)).squeeze()
-        border_limit = torch.mean(border_mask.float(), dim=norm_dim)
-        score[border_limit.bool()] = -10000
-        # print(score.size())
-        # print(x.size())
-        if len(x.size()) == 3:
-            x_topk_list = []
-            mask_list = []
-            index_list = []
-            for b in range(x.size(0)):
-                score_ini = score[b].squeeze()
-                # print(score_ini.size())
-                topk_score, topk_index = torch.topk(score_ini, int(x.size(-1)*self.topk_ratio))
-                x_ini = x[b].squeeze()
-                x_topk_list.append(x_ini[:, topk_index])
-                un_x = torch.zeros(x_ini.size(), device=device)
-                # un_x[:] = torch.Tensor([0], device=device)
-                un_x = un_x.index_fill(1, topk_index, 1)
-                mask_list.append(un_x)
-                index_list.append(topk_index)
-            x_topk = torch.stack(x_topk_list)
-            mask = torch.stack(mask_list)
-            index = torch.stack(index_list)
-        elif len(x.size()) == 2:
-            topk_score, topk_index = torch.topk(score_ini, int(x.size(-1)*self.topk_ratio))
-            x_topk = x[:, topk_index]
-            mask = torch.zeros(x_ini.size(), device=device)
-            mask = mask.index_fill(1, topk_index, 1)
-            index = topk_index
-        x = self.process(x_topk)
-        x = self.compress(x)
+        if ups_mode=='8x':  # prev best
+            self.lin1 = nn.Linear(h, 16384, bias=False)
+            self.norm = nn.GroupNorm(1, 256)
+            
+            self.upsampler = Decoder(
+                in_channels=256,
+                out_channels=4,
+                up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D"],
+                block_out_channels=[64, 128, 256, 256],
+                layers_per_block=1,
+            )
+            self.maps_projector = nn.Identity()
+        
+        if ups_mode=='16x':
+            self.lin1 = nn.Linear(h, 8192, bias=False)
+            self.norm = nn.GroupNorm(1, 512)
+            
+            self.upsampler = Decoder(
+                in_channels=512,
+                out_channels=4,
+                up_block_types=["UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D","UpDecoderBlock2D", "UpDecoderBlock2D"],
+                block_out_channels=[64, 128, 256, 256, 512],
+                layers_per_block=1,
+            )
+            self.maps_projector = nn.Identity()
 
-        return x, mask, border_mask, index
+            if use_cont:
+                self.maps_projector = nn.Sequential(
+                    nn.Conv2d(64, 512, 1, bias=False),
+                    nn.GroupNorm(1,512),
+                    nn.ReLU(True),
+                    nn.Conv2d(512, 512, 1, bias=False),
+                    nn.GroupNorm(1,512),
+                    nn.ReLU(True),
+                    nn.Conv2d(512, 512, 1, bias=True),
+                )
+            else:
+                self.maps_projector = nn.Identity()
 
-class VCM_Decoder(nn.Module):
-    def __init__(self, args):
-        super(VCM_Decoder, self).__init__()
+    def forward(self, x, return_transformer_feats=False):
+        x = self.lin0(x)
+        residual = x
+        for res_block in self.mlp:
+            x = res_block(x)
+            x = x + residual
+            residual = x
+        x = x.reshape(len(x), -1)
+        x = self.lin1(x)  # bs, 4096
 
-        self.args = args
-        self.topk_ratio = args.topk_ratio
-        self.regions = args.regions
-        self.unzip = nn.Sequential(nn.Linear(int(self.regions*self.topk_ratio**2), int(self.regions*self.topk_ratio)))
-        self.unprocess = nn.Linear(int(self.regions*self.topk_ratio), int(self.regions*self.topk_ratio))
-        self.rest = nn.Linear(int(self.regions*self.topk_ratio), args.rest_limitation)
-
-
-    def forward(self, x, border_mask, index):
-        x = self.unzip(x)
-        x = self.unprocess(x)
-        x_rest = self.rest(x)
-        x_recon = torch.zeros(border_mask.size()).to(device)
-        # print(mask)
-        for b in range(x_recon.size(0)):
-            x_recon[b, :, index[b]] = x[b]
-            rest_num = int(torch.sum(border_mask[b].sum(dim=0)==False)-self.regions*self.topk_ratio)
-            rest_index = border_mask[b].sum(dim=0)
-            rest_index[index[b]] = True
-            if rest_num > self.args.rest_limitation:
-                print('adjust')
-                rest_num = self.args.rest_limitation
-                rest_index_res = rest_index[rest_index==False]
-                rest_index_res[rest_num:] = True
-                rest_index[rest_index==False] = rest_index_res
-            x_recon[b, :, rest_index==False] = x_rest[b, :, :rest_num]
-        # x_recon = self.recon(x_recon)
-        # x_recon[border_mask] = torch.nan
-
-        return x_recon
-
-class VCM(nn.Module):
-    def __init__(self, args):
-        super(VCM, self).__init__()
-
-        self.args = args
-        self.encoder = VCM_Encoder(args)
-        self.decoder = VCM_Decoder(args)
-
-    def forward(self, x, mask=None, border_mask=None, index=None, mode='full'):
-
-        if mode == 'full':
-            x_compress, mask, border_mask, index = self.encoder(x)
-            x_recon = self.decoder(x_compress, border_mask, index)
-            if torch.sum(torch.isnan(x_compress)) != 0:
-                print('Compression is NAN')
-            if torch.sum(torch.isnan(x_recon)) != 0:
-                print('Reconstruction is NAN')
-
-            return x_recon, x_compress, mask, border_mask, index
-        elif mode == 'encode':
-            x_compress, mask, border_mask, index = self.encoder(x)
-
-            return x_compress, mask, border_mask, index
-        elif mode == 'decode':
-            x_recon = self.decoder(x, border_mask, index)
-
-            return x_recon
+        if self.ups_mode == '4x':
+            side = 16
+        if self.ups_mode == '8x':
+            side = 8
+        if self.ups_mode == '16x':
+            side = 4
+        
+        # decoder
+        x = self.norm(x.reshape(x.shape[0], -1, side, side).contiguous())
+        if return_transformer_feats:
+            return self.upsampler(x), self.maps_projector(x).flatten(2).permute(0,2,1)
+        return self.upsampler(x)
 
 
 

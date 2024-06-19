@@ -11,26 +11,11 @@ import torch.nn.functional as F
 from PIL import Image
 
 from dataset import integrated_dataset, coco_brain
-from model import Brain_Modelling, FrozenCLIP, Decoder_Img, Vec2Text
-from train_eval import cross_validation_with_val_set
+from model import Brain_Modelling, VAE_Img, Decoder_Img, Vec2Text
 
 from param_parser import parameter_parser
   
 device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-def main_classification():
-    args = parameter_parser()
-    # print(args)
-    dataset = integrated_dataset(args)
-    # print('go dataset')
-    # args(666)
-
-    model = Brain_Modelling(args, args.regions, args.time_points)
-    # print('hello model')
-    model = model.to(device)
-    # print(model.__repr__())
-    cross_validation_with_val_set(dataset, model, args.folds, args.epochs, args.batch_size, args.lr,
-                                  args, args.weight_decay, logger=None)
 
 def main():
    args = parameter_parser()
@@ -55,7 +40,7 @@ def main():
 
    main_model, optimizer, train_loader = accelerator.prepare(main_model, optimizer, train_loader)
 
-   clip = FrozenCLIP(args).to(device)
+   img_encoder = VAE_Img(args).to(device)
   #  decoder = Decoder_Img(args).to(device)
    v2t = Vec2Text(mode='embed').to(device)
 
@@ -69,13 +54,14 @@ def main():
         #  print(caption[0][3:6])
 
          fmri = fmri.to(device)
-         embeded_img_list = []
-         for img_idx in range(img.size(0)):
-            img_sig = img[img_idx].cpu().numpy()
-            img_sig = Image.fromarray(img_sig.astype(np.uint8))
-            embeded_img_list.append(clip.image_encode(img_sig).squeeze())
-         embeded_img = torch.stack(embeded_img_list)
-         del embeded_img_list
+        #  embeded_img_list = []
+        #  for img_idx in range(img.size(0)):
+        #     img_sig = img[img_idx].cpu().numpy()
+        #     img_sig = Image.fromarray(img_sig.astype(np.uint8))
+        #     embeded_img_list.append(img_encoder.image_encode(img_sig).squeeze())
+        #  embeded_img = torch.stack(embeded_img_list)
+        #  del embeded_img_list
+         embeded_img = img_encoder.encode_img(img)
 
          feature_txt, feature_img, theo_brain, _ = main_model(fmri)
 
@@ -83,18 +69,8 @@ def main():
 
          embeded_text = v2t.text_embedding(caption)
 
-        #  loss_text = 0
-        #  loss_text_flag = 1
-        #  for idx in range(embeded_text.size(0)):
-        #     loss_text_temp = soft_clip_loss(feature_txt, embeded_text[idx])
-        #     if loss_text_flag:
-        #         loss_text = loss_text_temp
-        #         loss_text_flag = 0
-        #     elif loss_text > loss_text_temp:
-        #         loss_text = loss_text_temp
-
          loss_text = soft_clip_loss(feature_txt, embeded_text)
-         loss_img = soft_clip_loss(feature_img, embeded_img)
+         loss_img = soft_clip_loss(feature_img.view(feature_img.size(0),-1), embeded_img.view(feature_img.size(0),-1))
 
          loss = loss_text + loss_img
 
