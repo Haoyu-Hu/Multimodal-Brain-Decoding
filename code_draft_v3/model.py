@@ -28,7 +28,7 @@ class Vec2Text(nn.Module):
         elif mode == 'invert':
             self.corrector = vec2text.load_pretrained_corrector("gtr_base")
 
-    def invert_embedding(self, embedding):
+    def text_decoding(self, embedding):
         if self.mode == 'embed':
             return 0
         
@@ -65,7 +65,7 @@ class VAE_Img(nn.Module):
         self.vae = AutoencoderKL.from_pretrained("CompVis/stable-diffusion-v1-4", subfolder="vae")
 
 
-    def encode_img(self, input_img):
+    def img_embedding(self, input_img):
         # Single image -> single latent in a batch (so size b, 4, 64, 64)
         if input_img.size(-1) == 3:
             input_img = Resize(size=(512,512))(input_img.permute(0, -1, 1, 2)).float()
@@ -82,14 +82,19 @@ class VAE_Img(nn.Module):
             
         return torch.stack(latent_list, dim=0)
 
-    def decode_img(self, latents):
+    def img_decoding(self, latents):
         # bath of latents -> list of images
-        latents = (1 / 0.18215) * latents
-        with torch.no_grad():
-            image = self.vae.decode(latents).sample
-        image = (image / 2 + 0.5).clamp(0, 1)
-        image = image.detach()
-        return image
+        img_store = []
+        for latent_idx in range(latents.size(0)):
+            latent_item = latents[latent_idx].unsqueeze(0)
+            latent_item = (1 / 0.18215) * latent_item
+            with torch.no_grad():
+                image = self.vae.decode(latent_item).sample
+            image = (image / 2 + 0.5).clamp(0, 1)
+            image = image.detach()
+            img_store.append(image)
+        
+        return torch.stack(img_store, dim=0)
 
 
 class FrozenCLIP(nn.Module):

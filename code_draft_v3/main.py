@@ -1,6 +1,8 @@
 import wandb
 import numpy as np
 import math
+import os
+import tqdm
 
 from accelerate import Accelerator
 
@@ -26,8 +28,6 @@ def main():
 
    slice_set = [args.z_slice, args.x_slice, args.y_slice]
 
-   train_dataset = coco_brain(args.train_path, slice_set)
-
    main_model = Brain_Modelling(args).to(device)
 
    wandb.watch(main_model, log='all')
@@ -35,7 +35,8 @@ def main():
    optimizer = torch.optim.Adam(main_model.parameters(), args.lr
                       , weight_decay=args.weight_decay)
    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=args.epochs)
-
+   
+   train_dataset = coco_brain(args.train_path, slice_set)
    train_loader = torch.utils.data.DataLoader(train_dataset, batch_size=args.batch_size)
 
    main_model, optimizer, train_loader = accelerator.prepare(main_model, optimizer, train_loader)
@@ -44,35 +45,33 @@ def main():
   #  decoder = Decoder_Img(args).to(device)
    v2t = Vec2Text(mode='embed').to(device)
 
+   train(args, train_loader, main_model, img_encoder, v2t, optimizer, scheduler, accelerator)
+
+
+def train(args, train_loader, main_model, img_encoder, text_encoder, optimizer, scheduler=None, accelerator=None):
+
+   optim_loss = 0
+   optim_loss_flag = 1
    for epoch in range(args.epochs):
       # adjust_learning_rate(optimizer, epoch, args)
       
-      for fmri, img, caption in train_loader:
-
-        #  print(caption)
-        #  print(caption[0][:3])
-        #  print(caption[0][3:6])
+      loss_epoch = 0
+      for count, (fmri, img, caption) in enumerate(tqdm(train_loader)):
 
          fmri = fmri.to(device)
-        #  embeded_img_list = []
-        #  for img_idx in range(img.size(0)):
-        #     img_sig = img[img_idx].cpu().numpy()
-        #     img_sig = Image.fromarray(img_sig.astype(np.uint8))
-        #     embeded_img_list.append(img_encoder.image_encode(img_sig).squeeze())
-        #  embeded_img = torch.stack(embeded_img_list)
-        #  del embeded_img_list
-         embeded_img = img_encoder.encode_img(img)
 
          feature_txt, feature_img, theo_brain, _ = main_model(fmri)
 
          theo_loss = F.mse_loss(fmri, theo_brain)
 
-         embeded_text = v2t.text_embedding(caption)
+         embeded_text = text_encoder.text_embedding(caption)
+         embeded_img = img_encoder.img_embedding(img)
 
          loss_text = soft_clip_loss(feature_txt, embeded_text)
          loss_img = soft_clip_loss(feature_img.view(feature_img.size(0),-1), embeded_img.view(feature_img.size(0),-1))
 
-         loss = loss_text + loss_img
+         loss = loss_text + loss_img + args.beta*theo_loss
+         loss_epoch += loss.item()
 
          optimizer.zero_grad()
          
@@ -86,6 +85,15 @@ def main():
                     , 'brain_loss': theo_loss
                     , 'epoch': epoch
                     , 'learning_rate': get_lr(optimizer)})
+      
+      if args.save_model:
+          if optim_loss_flag:
+            optim_loss = loss_epoch/(count+1)
+            torch.save(main_model.state_dict(), os.path.join(args.save_model, 'best_model.pt'))
+            optim_loss_flag = 0
+          elif optim_loss > loss_epoch/(count+1):
+            optim_loss = loss_epoch/(count+1)
+            torch.save(main_model.state_dict(), os.path.join(args.save_model, 'best_model.pt'))
 
       scheduler.step()
 
